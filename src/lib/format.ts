@@ -113,9 +113,29 @@ export interface Vehicle {
   approvalStatus: string;
   availabilityStatus: string;
   primaryImageUrl: string;
+  images?: VehicleImageItem[];
   ownerCompany?: string;
   ownerLocation?: string;
   isDemo: boolean;
+}
+
+export interface VehicleImageItem {
+  id: number;
+  vehicleId: number;
+  imageUrl: string;
+  caption: string | null;
+  sortOrder: number;
+}
+
+export interface NotificationItem {
+  id: number;
+  userId: number;
+  type: string;
+  title: string;
+  message: string;
+  linkUrl: string | null;
+  isRead: boolean;
+  createdAt: string;
 }
 
 export interface BookingRecord {

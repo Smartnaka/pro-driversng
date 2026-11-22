@@ -95,8 +95,13 @@ export function BookingPage() {
       setCustomerName((prev) => prev || user.fullName);
       setCustomerEmail((prev) => prev || user.email);
       setCustomerPhone((prev) => (prev === '+234 ' && user.phone ? user.phone : prev));
+      if (!searchParams.get('pickup') && user.defaultPickupLocation) {
+        setPickupLocation((prev) =>
+          prev === LAGOS_LOCATIONS[0] ? user.defaultPickupLocation! : prev
+        );
+      }
     }
-  }, [user]);
+  }, [user, searchParams]);
 
   useEffect(() => {
     Promise.all([
@@ -294,9 +299,18 @@ export function BookingPage() {
                 <p className="text-sm text-slate-600">
                   Your Naira payment has been verified and recorded. Your trip is now confirmed in your dashboard.
                 </p>
-                <div className="pt-4">
-                  <Button onClick={() => navigate('/dashboard')}>
-                    View Booking in Dashboard
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
+                  <Button
+                    variant="primary"
+                    onClick={() => navigate(`/dashboard/bookings/${createdBooking.id}`)}
+                  >
+                    View Booking Details
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => navigate('/dashboard')}
+                  >
+                    Customer Dashboard
                   </Button>
                 </div>
               </div>
@@ -341,13 +355,22 @@ export function BookingPage() {
                           : `Pay ${formatNaira(createdBooking.totalAmountNgn)} with Paystack`}
                       </span>
                     </Button>
-                    <Button
-                      variant="ghost"
-                      className="w-full"
-                      onClick={() => navigate('/dashboard')}
-                    >
-                      Pay Later from Dashboard
-                    </Button>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <Button
+                        variant="ghost"
+                        className="w-full"
+                        onClick={() => navigate(`/dashboard/bookings/${createdBooking.id}`)}
+                      >
+                        View Booking Details
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        className="w-full"
+                        onClick={() => navigate('/dashboard')}
+                      >
+                        Pay Later from Dashboard
+                      </Button>
+                    </div>
                   </div>
                 ) : paymentState.mode === 'SANDBOX_UNCONFIGURED' ? (
                   <div className="space-y-4 rounded-xl border border-amber-200 bg-amber-50/70 p-5">

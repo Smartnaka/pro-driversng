@@ -10,6 +10,12 @@ const SESSION_SECRET =
 
 const ADMIN_EMAIL = 'adeotiisrael2022@gmail.com';
 
+export interface NotificationPrefs {
+  bookingAlerts: boolean;
+  paymentAlerts: boolean;
+  marketingEmails: boolean;
+}
+
 export interface AuthUser {
   id: number;
   uid: string;
@@ -18,7 +24,23 @@ export interface AuthUser {
   phone: string | null;
   role: 'CUSTOMER' | 'DRIVER' | 'VEHICLE_OWNER' | 'ADMIN';
   avatarUrl: string | null;
+  defaultPickupLocation: string | null;
+  onboardingCompleted: boolean;
+  notificationPrefs: NotificationPrefs;
+  hasPassword: boolean;
   isActive: boolean;
+}
+
+export function isSafeImageInput(val: unknown): val is string {
+  if (typeof val !== 'string') return false;
+  const trimmed = val.trim();
+  if (!trimmed || trimmed.length > 900_000) return false;
+  if (trimmed.startsWith('/src/assets/')) return true;
+  if (/^https:\/\/[^\s]+$/i.test(trimmed)) return true;
+  if (/^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/i.test(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 export interface AuthRequest extends Request {
@@ -150,7 +172,12 @@ export async function getOrCreateFirebaseUser(params: {
   return toAuthUser(created);
 }
 
-function toAuthUser(row: typeof users.$inferSelect): AuthUser {
+export function toAuthUser(row: typeof users.$inferSelect): AuthUser {
+  const prefs = row.notificationPrefs || {
+    bookingAlerts: true,
+    paymentAlerts: true,
+    marketingEmails: false,
+  };
   return {
     id: row.id,
     uid: row.uid,
@@ -159,6 +186,14 @@ function toAuthUser(row: typeof users.$inferSelect): AuthUser {
     phone: row.phone,
     role: row.role as AuthUser['role'],
     avatarUrl: row.avatarUrl,
+    defaultPickupLocation: row.defaultPickupLocation ?? null,
+    onboardingCompleted: Boolean(row.onboardingCompleted),
+    notificationPrefs: {
+      bookingAlerts: prefs.bookingAlerts !== false,
+      paymentAlerts: prefs.paymentAlerts !== false,
+      marketingEmails: Boolean(prefs.marketingEmails),
+    },
+    hasPassword: Boolean(row.passwordHash),
     isActive: row.isActive,
   };
 }
@@ -195,7 +230,8 @@ export async function resolveAuthUserFromHeader(
     });
     if (!user.isActive) return null;
     return user;
-  } catch {
+  } catch (err) {
+    console.error('Firebase token verification/sync failed:', err);
     return null;
   }
 }

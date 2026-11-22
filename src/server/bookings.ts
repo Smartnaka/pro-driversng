@@ -9,9 +9,11 @@ import {
   notifications,
   payments,
   transactions,
+  users,
   vehicles,
   vehicleOwners,
 } from '../db/schema.ts';
+
 import {
   calculateBookingPricing,
   computeEndDate,
@@ -26,6 +28,38 @@ const ACTIVE_BOOKING_STATUSES = [
   'CONFIRMED',
   'IN_PROGRESS',
 ];
+
+export async function createNotification(
+  params: {
+    userId: number;
+    type?: 'BOOKING' | 'PAYMENT' | 'VERIFICATION' | 'GENERAL';
+    title: string;
+    message: string;
+    linkUrl?: string | null;
+  },
+  txDb: typeof db = db
+) {
+  const type = params.type || 'GENERAL';
+  const [recipient] = await txDb
+    .select({ notificationPrefs: users.notificationPrefs })
+    .from(users)
+    .where(eq(users.id, params.userId))
+    .limit(1);
+
+  if (!recipient) return;
+
+  const prefs = recipient.notificationPrefs;
+  if (type === 'BOOKING' && prefs && prefs.bookingAlerts === false) return;
+  if (type === 'PAYMENT' && prefs && prefs.paymentAlerts === false) return;
+
+  await txDb.insert(notifications).values({
+    userId: params.userId,
+    type,
+    title: params.title,
+    message: params.message,
+    linkUrl: params.linkUrl ?? null,
+  });
+}
 
 export interface CreateBookingPayload {
   customerId: number;
@@ -255,12 +289,28 @@ export async function createTransactionalBooking(payload: CreateBookingPayload) 
       note: 'Booking created and awaiting payment confirmation.',
     });
 
+    await createNotification(
+      {
+        userId: payload.customerId,
+        type: 'BOOKING',
+        title: `Booking Created (${bookingCode})`,
+        message: `Your ${payload.serviceType.toLowerCase().replace(/_/g, ' ')} request starting at ${payload.pickupLocation} is awaiting payment.`,
+        linkUrl: `/dashboard/bookings/${created.id}`,
+      },
+      tx as unknown as typeof db
+    );
+
     if (driverRow) {
-      await tx.insert(notifications).values({
-        userId: driverRow.userId,
-        title: `New Booking Request (${bookingCode})`,
-        message: `${payload.customerName} requested a ${payload.durationCount} ${payload.durationUnit.toLowerCase()} trip starting at ${payload.pickupLocation}.`,
-      });
+      await createNotification(
+        {
+          userId: driverRow.userId,
+          type: 'BOOKING',
+          title: `New Booking Request (${bookingCode})`,
+          message: `${payload.customerName} requested a ${payload.durationCount} ${payload.durationUnit.toLowerCase()} trip starting at ${payload.pickupLocation}.`,
+          linkUrl: `/dashboard/bookings/${created.id}`,
+        },
+        tx as unknown as typeof db
+      );
     }
 
     if (vehicleRow) {
@@ -270,11 +320,16 @@ export async function createTransactionalBooking(payload: CreateBookingPayload) 
         .where(eq(vehicleOwners.id, vehicleRow.ownerId))
         .limit(1);
       if (ownerRow) {
-        await tx.insert(notifications).values({
-          userId: ownerRow.userId,
-          title: `New Vehicle Reservation (${bookingCode})`,
-          message: `${vehicleRow.year} ${vehicleRow.make} ${vehicleRow.model} reserved by ${payload.customerName}.`,
-        });
+        await createNotification(
+          {
+            userId: ownerRow.userId,
+            type: 'BOOKING',
+            title: `New Vehicle Reservation (${bookingCode})`,
+            message: `${vehicleRow.year} ${vehicleRow.make} ${vehicleRow.model} reserved by ${payload.customerName}.`,
+            linkUrl: `/dashboard/bookings/${created.id}`,
+          },
+          tx as unknown as typeof db
+        );
       }
     }
 
@@ -372,6 +427,58 @@ export async function finalizePaidBookingIdempotent(params: {
         description: `Platform service fee for ${booking.bookingCode}`,
       },
     ]);
+
+    await createNotification(
+      {
+        userId: booking.customerId,
+        type: 'PAYMENT',
+        title: `Payment Completed (${booking.bookingCode})`,
+        message: `Payment ${params.reference} for ₦${payment.amountNgn.toLocaleString('en-NG')} has been verified. Your booking is confirmed.`,
+        linkUrl: `/dashboard/bookings/${booking.id}`,
+      },
+      tx as unknown as typeof db
+    );
+
+    if (booking.driverId) {
+      const [driverRow] = await tx
+        .select({ userId: driverProfiles.userId })
+        .from(driverProfiles)
+        .where(eq(driverProfiles.id, booking.driverId))
+        .limit(1);
+      if (driverRow) {
+        await createNotification(
+          {
+            userId: driverRow.userId,
+            type: 'BOOKING',
+            title: `Booking Confirmed & Paid (${booking.bookingCode})`,
+            message: `Customer payment has been verified for your trip starting at ${booking.pickupLocation}.`,
+            linkUrl: `/dashboard/bookings/${booking.id}`,
+          },
+          tx as unknown as typeof db
+        );
+      }
+    }
+
+    if (booking.vehicleId) {
+      const [ownerRow] = await tx
+        .select({ userId: vehicleOwners.userId })
+        .from(vehicles)
+        .innerJoin(vehicleOwners, eq(vehicles.ownerId, vehicleOwners.id))
+        .where(eq(vehicles.id, booking.vehicleId))
+        .limit(1);
+      if (ownerRow) {
+        await createNotification(
+          {
+            userId: ownerRow.userId,
+            type: 'BOOKING',
+            title: `Rental Payment Confirmed (${booking.bookingCode})`,
+            message: `Payment for booking ${booking.bookingCode} has been verified via ${params.channel}.`,
+            linkUrl: `/dashboard/bookings/${booking.id}`,
+          },
+          tx as unknown as typeof db
+        );
+      }
+    }
 
     return {
       payment: updatedPayment,

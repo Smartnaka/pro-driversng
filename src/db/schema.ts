@@ -19,6 +19,16 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'),
   role: text('role').notNull().default('CUSTOMER'), // CUSTOMER | DRIVER | VEHICLE_OWNER | ADMIN
   avatarUrl: text('avatar_url'),
+  defaultPickupLocation: text('default_pickup_location'),
+  onboardingCompleted: boolean('onboarding_completed').notNull().default(false),
+  notificationPrefs: jsonb('notification_prefs')
+    .$type<{
+      bookingAlerts: boolean;
+      paymentAlerts: boolean;
+      marketingEmails: boolean;
+    }>()
+    .notNull()
+    .default({ bookingAlerts: true, paymentAlerts: true, marketingEmails: false }),
   isActive: boolean('is_active').notNull().default(true),
   isDemo: boolean('is_demo').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
@@ -243,8 +253,10 @@ export const notifications = pgTable('notifications', {
   userId: integer('user_id')
     .references(() => users.id, { onDelete: 'cascade' })
     .notNull(),
+  type: text('type').notNull().default('GENERAL'),
   title: text('title').notNull(),
   message: text('message').notNull(),
+  linkUrl: text('link_url'),
   isRead: boolean('is_read').notNull().default(false),
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });

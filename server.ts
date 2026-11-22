@@ -38,14 +38,17 @@ import {
 import {
   getOrCreateFirebaseUser,
   hashPassword,
+  isSafeImageInput,
   requireAuth,
   requireRole,
   signSessionToken,
+  toAuthUser,
   verifyPassword,
   type AuthRequest,
 } from './src/server/auth.ts';
 import {
   checkAvailabilityConflicts,
+  createNotification,
   createTransactionalBooking,
   finalizePaidBookingIdempotent,
 } from './src/server/bookings.ts';
@@ -193,6 +196,22 @@ app.post('/api/auth/register', async (req, res) => {
         });
       }
 
+      await createNotification(
+        {
+          userId: user.id,
+          type: 'GENERAL',
+          title: 'Welcome to ProDrivers',
+          message:
+            targetRole === 'DRIVER'
+              ? 'Complete your driver profile and submit verification credentials to start receiving bookings.'
+              : targetRole === 'VEHICLE_OWNER'
+                ? 'Complete your fleet onboarding and list your first vehicle for approval.'
+                : 'Complete your rider preferences to streamline future bookings.',
+          linkUrl: '/onboarding',
+        },
+        tx as unknown as typeof db
+      );
+
       return user;
     });
 
@@ -205,15 +224,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     res.status(201).json({
       token,
-      user: {
-        id: createdUser.id,
-        uid: createdUser.uid,
-        email: createdUser.email,
-        fullName: createdUser.fullName,
-        phone: createdUser.phone,
-        role: createdUser.role,
-        avatarUrl: createdUser.avatarUrl,
-      },
+      user: toAuthUser(createdUser),
     });
   } catch (err) {
     console.error('Register error:', err);
@@ -252,15 +263,7 @@ app.post('/api/auth/login', async (req, res) => {
 
     res.json({
       token,
-      user: {
-        id: user.id,
-        uid: user.uid,
-        email: user.email,
-        fullName: user.fullName,
-        phone: user.phone,
-        role: user.role,
-        avatarUrl: user.avatarUrl,
-      },
+      user: toAuthUser(user),
     });
   } catch (err) {
     console.error('Login error:', err);
@@ -468,10 +471,29 @@ app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
       .where(eq(vehicleOwners.userId, authUser.id))
       .limit(1);
 
+    let ownerVehiclesCount = 0;
+    let driverDocsCount = 0;
+    if (driver) {
+      const [docAgg] = await db
+        .select({ total: count() })
+        .from(driverDocuments)
+        .where(eq(driverDocuments.driverId, driver.id));
+      driverDocsCount = Number(docAgg?.total ?? 0);
+    }
+    if (owner) {
+      const [vehAgg] = await db
+        .select({ total: count() })
+        .from(vehicles)
+        .where(eq(vehicles.ownerId, owner.id));
+      ownerVehiclesCount = Number(vehAgg?.total ?? 0);
+    }
+
     res.json({
       user: authUser,
       driverProfile: driver || null,
       vehicleOwner: owner || null,
+      driverDocsCount,
+      ownerVehiclesCount,
     });
   } catch (err) {
     console.error('Get me error:', err);
@@ -481,33 +503,250 @@ app.get('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
 
 app.patch('/api/auth/me', requireAuth, async (req: AuthRequest, res) => {
   try {
-    const { fullName, phone } = req.body ?? {};
-    const [updated] = await db
-      .update(users)
-      .set({
-        fullName:
-          typeof fullName === 'string' && fullName.trim().length >= 2
-            ? fullName.trim()
-            : req.authUser!.fullName,
-        phone: typeof phone === 'string' ? phone.trim() : req.authUser!.phone,
-      })
-      .where(eq(users.id, req.authUser!.id))
-      .returning();
+    const {
+      fullName,
+      phone,
+      email,
+      avatarUrl,
+      defaultPickupLocation,
+      onboardingCompleted,
+      notificationPrefs,
+    } = req.body ?? {};
 
-    res.json({
-      user: {
-        id: updated.id,
-        uid: updated.uid,
-        email: updated.email,
-        fullName: updated.fullName,
-        phone: updated.phone,
-        role: updated.role,
-        avatarUrl: updated.avatarUrl,
-      },
+    const authUser = req.authUser!;
+    let nextEmail = authUser.email;
+
+    if (typeof email === 'string' && email.trim().toLowerCase() !== authUser.email) {
+      const candidate = email.trim().toLowerCase();
+      if (!candidate.includes('@') || candidate.length < 5) {
+        return res.status(400).json({ error: 'Please enter a valid email address.' });
+      }
+      const existing = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, candidate))
+        .limit(1);
+      if (existing.length > 0 && existing[0].id !== authUser.id) {
+        return res.status(409).json({ error: 'That email address is already in use.' });
+      }
+      nextEmail = candidate;
+    }
+
+    let nextAvatar = authUser.avatarUrl;
+    if (avatarUrl === null || avatarUrl === '') {
+      nextAvatar = null;
+    } else if (avatarUrl !== undefined) {
+      if (!isSafeImageInput(avatarUrl)) {
+        return res.status(400).json({
+          error: 'Avatar must be a valid HTTPS URL, preset asset, or PNG/JPEG/WEBP image under 650KB.',
+        });
+      }
+      nextAvatar = avatarUrl.trim();
+    }
+
+    const nextName =
+      typeof fullName === 'string' && fullName.trim().length >= 2
+        ? fullName.trim()
+        : authUser.fullName;
+
+    const nextPrefs = notificationPrefs && typeof notificationPrefs === 'object'
+      ? {
+          bookingAlerts:
+            typeof notificationPrefs.bookingAlerts === 'boolean'
+              ? notificationPrefs.bookingAlerts
+              : authUser.notificationPrefs.bookingAlerts,
+          paymentAlerts:
+            typeof notificationPrefs.paymentAlerts === 'boolean'
+              ? notificationPrefs.paymentAlerts
+              : authUser.notificationPrefs.paymentAlerts,
+          marketingEmails:
+            typeof notificationPrefs.marketingEmails === 'boolean'
+              ? notificationPrefs.marketingEmails
+              : authUser.notificationPrefs.marketingEmails,
+        }
+      : authUser.notificationPrefs;
+
+    const updated = await db.transaction(async (tx) => {
+      const [row] = await tx
+        .update(users)
+        .set({
+          fullName: nextName,
+          email: nextEmail,
+          phone: typeof phone === 'string' ? phone.trim() : authUser.phone,
+          avatarUrl: nextAvatar,
+          defaultPickupLocation:
+            typeof defaultPickupLocation === 'string'
+              ? defaultPickupLocation.trim() || null
+              : authUser.defaultPickupLocation,
+          onboardingCompleted:
+            typeof onboardingCompleted === 'boolean'
+              ? onboardingCompleted
+              : authUser.onboardingCompleted,
+          notificationPrefs: nextPrefs,
+        })
+        .where(eq(users.id, authUser.id))
+        .returning();
+
+      if (authUser.role === 'DRIVER' && nextName !== authUser.fullName) {
+        await tx
+          .update(driverProfiles)
+          .set({ fullName: nextName })
+          .where(eq(driverProfiles.userId, authUser.id));
+      }
+
+      return row;
     });
+
+    res.json({ user: toAuthUser(updated) });
   } catch (err) {
     console.error('Update profile error:', err);
     res.status(500).json({ error: 'Unable to update profile.' });
+  }
+});
+
+app.post('/api/auth/me/password', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body ?? {};
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      return res
+        .status(400)
+        .json({ error: 'New password must be at least 8 characters.' });
+    }
+
+    const [userRow] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, req.authUser!.id))
+      .limit(1);
+
+    if (!userRow) {
+      return res.status(404).json({ error: 'User account not found.' });
+    }
+
+    if (userRow.passwordHash) {
+      if (
+        typeof currentPassword !== 'string' ||
+        !verifyPassword(currentPassword, userRow.passwordHash)
+      ) {
+        return res.status(401).json({ error: 'Current password is incorrect.' });
+      }
+    }
+
+    await db
+      .update(users)
+      .set({ passwordHash: hashPassword(newPassword) })
+      .where(eq(users.id, userRow.id));
+
+    res.json({ message: 'Password updated successfully.' });
+  } catch (err) {
+    console.error('Change password error:', err);
+    res.status(500).json({ error: 'Unable to change password.' });
+  }
+});
+
+app.post('/api/auth/me/deactivate', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    if (req.authUser!.role === 'ADMIN') {
+      return res
+        .status(403)
+        .json({ error: 'Admin accounts cannot be self-deactivated.' });
+    }
+
+    const { password } = req.body ?? {};
+    const [userRow] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, req.authUser!.id))
+      .limit(1);
+
+    if (!userRow) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+
+    if (userRow.passwordHash) {
+      if (typeof password !== 'string' || !verifyPassword(password, userRow.passwordHash)) {
+        return res
+          .status(401)
+          .json({ error: 'Enter your current password to confirm deactivation.' });
+      }
+    }
+
+    await db
+      .update(users)
+      .set({ isActive: false })
+      .where(eq(users.id, userRow.id));
+
+    res.json({ message: 'Account deactivated.' });
+  } catch (err) {
+    console.error('Deactivate account error:', err);
+    res.status(500).json({ error: 'Unable to deactivate account.' });
+  }
+});
+
+// ---------------- NOTIFICATIONS ----------------
+
+app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const rows = await db
+      .select()
+      .from(notifications)
+      .where(eq(notifications.userId, req.authUser!.id))
+      .orderBy(desc(notifications.createdAt))
+      .limit(50);
+
+    const unreadCount = rows.filter((n) => !n.isRead).length;
+    res.json({ notifications: rows, unreadCount });
+  } catch (err) {
+    console.error('Load notifications error:', err);
+    res.status(500).json({ error: 'Unable to load notifications.' });
+  }
+});
+
+app.patch('/api/notifications/:id/read', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({ error: 'Invalid notification ID.' });
+    }
+
+    const [updated] = await db
+      .update(notifications)
+      .set({ isRead: true })
+      .where(
+        and(
+          eq(notifications.id, id),
+          eq(notifications.userId, req.authUser!.id)
+        )
+      )
+      .returning();
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Notification not found.' });
+    }
+
+    res.json({ notification: updated });
+  } catch (err) {
+    console.error('Mark notification read error:', err);
+    res.status(500).json({ error: 'Unable to update notification.' });
+  }
+});
+
+app.post('/api/notifications/read-all', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    await db
+      .update(notifications)
+      .set({ isRead: true })
+      .where(
+        and(
+          eq(notifications.userId, req.authUser!.id),
+          eq(notifications.isRead, false)
+        )
+      );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Mark all notifications read error:', err);
+    res.status(500).json({ error: 'Unable to update notifications.' });
   }
 });
 
@@ -802,6 +1041,38 @@ app.get('/api/cars/:id', async (req, res) => {
   }
 });
 
+// ---------------- PUBLIC GENUINE REVIEWS ----------------
+
+app.get('/api/reviews/public', async (_req, res) => {
+  try {
+    const rows = await db
+      .select({
+        id: reviews.id,
+        rating: reviews.rating,
+        comment: reviews.comment,
+        createdAt: reviews.createdAt,
+        customerName: users.fullName,
+        serviceType: bookings.serviceType,
+        driverName: driverProfiles.fullName,
+        vehicleMake: vehicles.make,
+        vehicleModel: vehicles.model,
+      })
+      .from(reviews)
+      .innerJoin(users, eq(reviews.customerId, users.id))
+      .innerJoin(bookings, eq(reviews.bookingId, bookings.id))
+      .leftJoin(driverProfiles, eq(reviews.driverId, driverProfiles.id))
+      .leftJoin(vehicles, eq(reviews.vehicleId, vehicles.id))
+      .where(eq(reviews.isDemo, false))
+      .orderBy(desc(reviews.createdAt))
+      .limit(6);
+
+    res.json({ reviews: rows });
+  } catch (err) {
+    console.error('Public reviews error:', err);
+    res.status(500).json({ error: 'Unable to load customer reviews.' });
+  }
+});
+
 // ---------------- SERVER-SIDE PRICING QUOTE ----------------
 
 app.post('/api/pricing/quote', async (req, res) => {
@@ -972,12 +1243,99 @@ app.get('/api/bookings/:id', requireAuth, async (req: AuthRequest, res) => {
       .orderBy(desc(bookingStatusLogs.createdAt));
 
     const bookingPayments = await db
-      .select()
+      .select({
+        id: payments.id,
+        bookingId: payments.bookingId,
+        reference: payments.reference,
+        provider: payments.provider,
+        amountNgn: payments.amountNgn,
+        currency: payments.currency,
+        status: payments.status,
+        channel: payments.channel,
+        paidAt: payments.paidAt,
+        createdAt: payments.createdAt,
+      })
       .from(payments)
       .where(eq(payments.bookingId, booking.id))
       .orderBy(desc(payments.createdAt));
 
-    res.json({ booking, statusLogs: logs, payments: bookingPayments });
+    let assignedDriver: {
+      id: number;
+      fullName: string;
+      photoUrl: string;
+      location: string;
+      yearsExperience: number;
+      verificationStatus: string;
+    } | null = null;
+
+    if (booking.driverId) {
+      const [dRow] = await db
+        .select({
+          id: driverProfiles.id,
+          fullName: driverProfiles.fullName,
+          photoUrl: driverProfiles.photoUrl,
+          location: driverProfiles.location,
+          yearsExperience: driverProfiles.yearsExperience,
+          verificationStatus: driverProfiles.verificationStatus,
+        })
+        .from(driverProfiles)
+        .where(eq(driverProfiles.id, booking.driverId))
+        .limit(1);
+      assignedDriver = dRow || null;
+    }
+
+    let assignedVehicle: {
+      id: number;
+      make: string;
+      model: string;
+      year: number;
+      category: string;
+      transmission: string;
+      seats: number;
+      location: string;
+      primaryImageUrl: string;
+      approvalStatus: string;
+    } | null = null;
+
+    if (booking.vehicleId) {
+      const [vRow] = await db
+        .select({
+          id: vehicles.id,
+          make: vehicles.make,
+          model: vehicles.model,
+          year: vehicles.year,
+          category: vehicles.category,
+          transmission: vehicles.transmission,
+          seats: vehicles.seats,
+          location: vehicles.location,
+          primaryImageUrl: vehicles.primaryImageUrl,
+          approvalStatus: vehicles.approvalStatus,
+        })
+        .from(vehicles)
+        .where(eq(vehicles.id, booking.vehicleId))
+        .limit(1);
+      assignedVehicle = vRow || null;
+    }
+
+    const isCustomerOrAdmin =
+      user.role === 'ADMIN' || booking.customerId === user.id;
+
+    // Limit personal contact exposure on partner views; only confirmed/active bookings share phone
+    const canSeeContactPhone =
+      isCustomerOrAdmin ||
+      ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(booking.status);
+
+    res.json({
+      booking: {
+        ...booking,
+        customerEmail: isCustomerOrAdmin ? booking.customerEmail : '',
+        customerPhone: canSeeContactPhone ? booking.customerPhone : 'Shared on confirmation',
+      },
+      driver: assignedDriver,
+      vehicle: assignedVehicle,
+      statusLogs: logs,
+      payments: bookingPayments,
+    });
   } catch (err) {
     console.error('Get booking detail error:', err);
     res.status(500).json({ error: 'Unable to load booking.' });
@@ -1037,6 +1395,61 @@ app.post('/api/bookings/:id/cancel', requireAuth, async (req: AuthRequest, res) 
           reference: `REF-${booking.bookingCode}`,
           description: `Refund recorded for cancelled booking ${booking.bookingCode}`,
         });
+      }
+
+      await createNotification(
+        {
+          userId: booking.customerId,
+          type: 'BOOKING',
+          title: `Booking Cancelled (${booking.bookingCode})`,
+          message:
+            nextStatus === 'REFUNDED'
+              ? `Booking ${booking.bookingCode} was cancelled and a refund of ₦${booking.totalAmountNgn.toLocaleString('en-NG')} has been recorded.`
+              : `Booking ${booking.bookingCode} was cancelled prior to payment.`,
+          linkUrl: `/dashboard/bookings/${booking.id}`,
+        },
+        tx as unknown as typeof db
+      );
+
+      if (booking.driverId) {
+        const [drv] = await tx
+          .select({ userId: driverProfiles.userId })
+          .from(driverProfiles)
+          .where(eq(driverProfiles.id, booking.driverId))
+          .limit(1);
+        if (drv) {
+          await createNotification(
+            {
+              userId: drv.userId,
+              type: 'BOOKING',
+              title: `Trip Cancelled (${booking.bookingCode})`,
+              message: `Customer cancelled booking ${booking.bookingCode}. Your calendar slot is now open.`,
+              linkUrl: `/dashboard/bookings/${booking.id}`,
+            },
+            tx as unknown as typeof db
+          );
+        }
+      }
+
+      if (booking.vehicleId) {
+        const [veh] = await tx
+          .select({ ownerUserId: vehicleOwners.userId })
+          .from(vehicles)
+          .innerJoin(vehicleOwners, eq(vehicles.ownerId, vehicleOwners.id))
+          .where(eq(vehicles.id, booking.vehicleId))
+          .limit(1);
+        if (veh) {
+          await createNotification(
+            {
+              userId: veh.ownerUserId,
+              type: 'BOOKING',
+              title: `Rental Cancelled (${booking.bookingCode})`,
+              message: `Customer cancelled rental ${booking.bookingCode}. Vehicle slot has been released.`,
+              linkUrl: `/dashboard/bookings/${booking.id}`,
+            },
+            tx as unknown as typeof db
+          );
+        }
       }
 
       return row;
@@ -1178,6 +1591,18 @@ app.post('/api/payments/initialize', requireAuth, async (req: AuthRequest, res) 
         .json({ error: 'This booking is no longer awaiting payment.' });
     }
 
+    const existingPaid = await db
+      .select({ id: payments.id })
+      .from(payments)
+      .where(and(eq(payments.bookingId, booking.id), eq(payments.status, 'PAID')))
+      .limit(1);
+
+    if (existingPaid.length > 0) {
+      return res
+        .status(409)
+        .json({ error: 'This booking has already been paid for.' });
+    }
+
     const reference = `PSK_${booking.bookingCode}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 
     await db.insert(payments).values({
@@ -1317,6 +1742,19 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
       payload.data?.status !== 'success' ||
       Number(payload.data?.amount) < payment.amountNgn * 100
     ) {
+      await db
+        .update(payments)
+        .set({ status: 'FAILED' })
+        .where(eq(payments.id, payment.id));
+
+      await createNotification({
+        userId: booking.customerId,
+        type: 'PAYMENT',
+        title: `Payment Failed (${booking.bookingCode})`,
+        message: `Verification failed for reference ${reference}. Please retry checkout from your booking details.`,
+        linkUrl: `/dashboard/bookings/${booking.id}`,
+      });
+
       return res.status(400).json({
         error: 'Paystack transaction has not succeeded or amount mismatch.',
       });
@@ -1385,7 +1823,16 @@ app.get('/api/payments/my', requireAuth, async (req: AuthRequest, res) => {
   try {
     const rows = await db
       .select({
-        payment: payments,
+        id: payments.id,
+        bookingId: payments.bookingId,
+        reference: payments.reference,
+        provider: payments.provider,
+        amountNgn: payments.amountNgn,
+        currency: payments.currency,
+        status: payments.status,
+        channel: payments.channel,
+        paidAt: payments.paidAt,
+        createdAt: payments.createdAt,
         bookingCode: bookings.bookingCode,
         serviceType: bookings.serviceType,
         pickupLocation: bookings.pickupLocation,
@@ -1395,14 +1842,7 @@ app.get('/api/payments/my', requireAuth, async (req: AuthRequest, res) => {
       .where(eq(bookings.customerId, req.authUser!.id))
       .orderBy(desc(payments.createdAt));
 
-    res.json({
-      payments: rows.map((r) => ({
-        ...r.payment,
-        bookingCode: r.bookingCode,
-        serviceType: r.serviceType,
-        pickupLocation: r.pickupLocation,
-      })),
-    });
+    res.json({ payments: rows });
   } catch (err) {
     console.error('List my payments error:', err);
     res.status(500).json({ error: 'Unable to load payment history.' });
@@ -1433,11 +1873,51 @@ app.get(
         .where(eq(driverDocuments.driverId, profile.id))
         .orderBy(desc(driverDocuments.createdAt));
 
-      const driverBookings = await db
-        .select()
+      const bookingRows = await db
+        .select({
+          booking: bookings,
+          vehicleMake: vehicles.make,
+          vehicleModel: vehicles.model,
+          vehicleYear: vehicles.year,
+        })
         .from(bookings)
+        .leftJoin(vehicles, eq(bookings.vehicleId, vehicles.id))
         .where(eq(bookings.driverId, profile.id))
         .orderBy(desc(bookings.createdAt));
+
+      const driverBookings = bookingRows.map((r) => ({
+        ...r.booking,
+        customerEmail: '',
+        customerPhone: ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(
+          r.booking.status
+        )
+          ? r.booking.customerPhone
+          : 'Shared on confirmation',
+        vehicleName: r.vehicleMake
+          ? `${r.vehicleYear} ${r.vehicleMake} ${r.vehicleModel}`
+          : null,
+      }));
+
+      const bookingIds = driverBookings.map((b) => b.id);
+      const paidPayments =
+        bookingIds.length > 0
+          ? await db
+              .select({
+                bookingId: payments.bookingId,
+                reference: payments.reference,
+                status: payments.status,
+                paidAt: payments.paidAt,
+              })
+              .from(payments)
+              .where(
+                and(
+                  inArray(payments.bookingId, bookingIds),
+                  eq(payments.status, 'PAID')
+                )
+              )
+          : [];
+
+      const paidByBooking = new Map(paidPayments.map((p) => [p.bookingId, p]));
 
       const blocks = await db
         .select()
@@ -1450,16 +1930,66 @@ app.get(
         )
         .orderBy(desc(availabilityBlocks.startDate));
 
-      const completedEarningsNgn = driverBookings
-        .filter((b) => b.status === 'COMPLETED' || b.status === 'CONFIRMED')
-        .reduce((sum, b) => sum + b.subtotalNgn, 0);
+      const computeDriverShare = (b: typeof bookings.$inferSelect) => {
+        if (!b.vehicleId) return b.subtotalNgn;
+        const unitRate =
+          b.durationUnit === 'HOURLY'
+            ? profile.hourlyRateNgn
+            : b.durationUnit === 'WEEKLY'
+              ? profile.weeklyRateNgn
+              : b.durationUnit === 'MONTHLY'
+                ? profile.monthlyRateNgn
+                : profile.dailyRateNgn;
+        return Math.min(b.subtotalNgn, unitRate * b.durationCount);
+      };
+
+      const earningsLedger = driverBookings
+        .filter(
+          (b) =>
+            ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(b.status) &&
+            paidByBooking.has(b.id)
+        )
+        .map((b) => {
+          const pay = paidByBooking.get(b.id)!;
+          const driverShareNgn = computeDriverShare(b);
+          return {
+            bookingId: b.id,
+            bookingCode: b.bookingCode,
+            serviceType: b.serviceType,
+            status: b.status,
+            reference: pay.reference,
+            paidAt: pay.paidAt || b.createdAt,
+            grossSubtotalNgn: b.subtotalNgn,
+            platformFeeNgn: b.platformFeeNgn,
+            driverShareNgn,
+          };
+        });
+
+      const completedEarningsNgn = earningsLedger
+        .filter((e) => e.status === 'COMPLETED')
+        .reduce((sum, e) => sum + e.driverShareNgn, 0);
+
+      const pendingEarningsNgn = earningsLedger
+        .filter((e) => e.status === 'CONFIRMED' || e.status === 'IN_PROGRESS')
+        .reduce((sum, e) => sum + e.driverShareNgn, 0);
+
+      const completedJobsCount = driverBookings.filter(
+        (b) => b.status === 'COMPLETED'
+      ).length;
 
       res.json({
-        profile,
+        profile: {
+          ...profile,
+          phone: req.authUser!.phone,
+        },
         documents: docs,
         bookings: driverBookings,
         availabilityBlocks: blocks,
         earningsNgn: completedEarningsNgn,
+        completedEarningsNgn,
+        pendingEarningsNgn,
+        completedJobsCount,
+        earningsLedger,
       });
     } catch (err) {
       console.error('Driver dashboard error:', err);
@@ -1485,6 +2015,10 @@ app.patch(
       }
 
       const {
+        fullName,
+        phone,
+        photoUrl,
+        yearsExperience,
         bio,
         location,
         serviceAreas,
@@ -1497,35 +2031,81 @@ app.patch(
         availabilityStatus,
       } = req.body ?? {};
 
-      const [updated] = await db
-        .update(driverProfiles)
-        .set({
-          bio: typeof bio === 'string' && bio.trim() ? bio.trim() : profile.bio,
-          location:
-            typeof location === 'string' && location.trim()
-              ? location.trim()
-              : profile.location,
-          serviceAreas: Array.isArray(serviceAreas)
-            ? serviceAreas
-            : profile.serviceAreas,
-          categories: Array.isArray(categories) ? categories : profile.categories,
-          languages: Array.isArray(languages) ? languages : profile.languages,
-          hourlyRateNgn:
-            Number(hourlyRateNgn) > 0 ? Number(hourlyRateNgn) : profile.hourlyRateNgn,
-          dailyRateNgn:
-            Number(dailyRateNgn) > 0 ? Number(dailyRateNgn) : profile.dailyRateNgn,
-          weeklyRateNgn:
-            Number(weeklyRateNgn) > 0 ? Number(weeklyRateNgn) : profile.weeklyRateNgn,
-          monthlyRateNgn:
-            Number(monthlyRateNgn) > 0 ? Number(monthlyRateNgn) : profile.monthlyRateNgn,
-          availabilityStatus: ['AVAILABLE', 'BUSY', 'OFFLINE'].includes(
-            availabilityStatus
-          )
-            ? availabilityStatus
-            : profile.availabilityStatus,
-        })
-        .where(eq(driverProfiles.id, profile.id))
-        .returning();
+      let nextPhotoUrl = profile.photoUrl;
+      if (photoUrl !== undefined && photoUrl !== null && photoUrl !== '') {
+        if (!isSafeImageInput(photoUrl)) {
+          return res.status(400).json({
+            error: 'Profile photo must be a valid HTTPS URL, preset asset, or PNG/JPEG/WEBP upload under 650KB.',
+          });
+        }
+        nextPhotoUrl = photoUrl.trim();
+      }
+
+      const nextName =
+        typeof fullName === 'string' && fullName.trim().length >= 2
+          ? fullName.trim()
+          : profile.fullName;
+
+      const updated = await db.transaction(async (tx) => {
+        const [driverRow] = await tx
+          .update(driverProfiles)
+          .set({
+            fullName: nextName,
+            photoUrl: nextPhotoUrl,
+            yearsExperience:
+              Number(yearsExperience) >= 1 && Number(yearsExperience) <= 50
+                ? Math.floor(Number(yearsExperience))
+                : profile.yearsExperience,
+            bio: typeof bio === 'string' && bio.trim() ? bio.trim() : profile.bio,
+            location:
+              typeof location === 'string' && location.trim()
+                ? location.trim()
+                : profile.location,
+            serviceAreas: Array.isArray(serviceAreas)
+              ? serviceAreas.map((s) => String(s).trim()).filter(Boolean)
+              : profile.serviceAreas,
+            categories: Array.isArray(categories)
+              ? categories.map((s) => String(s).trim()).filter(Boolean)
+              : profile.categories,
+            languages: Array.isArray(languages)
+              ? languages.map((s) => String(s).trim()).filter(Boolean)
+              : profile.languages,
+            hourlyRateNgn:
+              Number(hourlyRateNgn) >= 1000
+                ? Math.round(Number(hourlyRateNgn))
+                : profile.hourlyRateNgn,
+            dailyRateNgn:
+              Number(dailyRateNgn) >= 5000
+                ? Math.round(Number(dailyRateNgn))
+                : profile.dailyRateNgn,
+            weeklyRateNgn:
+              Number(weeklyRateNgn) >= 20000
+                ? Math.round(Number(weeklyRateNgn))
+                : profile.weeklyRateNgn,
+            monthlyRateNgn:
+              Number(monthlyRateNgn) >= 80000
+                ? Math.round(Number(monthlyRateNgn))
+                : profile.monthlyRateNgn,
+            availabilityStatus: ['AVAILABLE', 'BUSY', 'OFFLINE'].includes(
+              availabilityStatus
+            )
+              ? availabilityStatus
+              : profile.availabilityStatus,
+          })
+          .where(eq(driverProfiles.id, profile.id))
+          .returning();
+
+        await tx
+          .update(users)
+          .set({
+            fullName: nextName,
+            phone:
+              typeof phone === 'string' ? phone.trim() : req.authUser!.phone,
+          })
+          .where(eq(users.id, req.authUser!.id));
+
+        return driverRow;
+      });
 
       res.json({ profile: updated });
     } catch (err) {
@@ -1551,11 +2131,36 @@ app.post(
         return res.status(404).json({ error: 'Driver profile not found.' });
       }
 
-      const { docType, documentNumber } = req.body ?? {};
-      if (!docType || !documentNumber || String(documentNumber).trim().length < 4) {
+      const { docType, documentNumber, fileUrl } = req.body ?? {};
+      const allowedTypes = [
+        'DRIVERS_LICENSE',
+        'LASDRI_CERT',
+        'NIN_ID',
+        'BACKGROUND_CHECK',
+      ];
+      if (
+        !allowedTypes.includes(String(docType)) ||
+        !documentNumber ||
+        String(documentNumber).trim().length < 4
+      ) {
         return res
           .status(400)
-          .json({ error: 'Document type and valid document number are required.' });
+          .json({ error: 'Valid document type and document number are required.' });
+      }
+
+      let safeFileUrl: string | null = null;
+      if (fileUrl) {
+        if (
+          typeof fileUrl === 'string' &&
+          (isSafeImageInput(fileUrl) ||
+            /^data:application\/pdf;base64,[A-Za-z0-9+/=]+$/i.test(fileUrl))
+        ) {
+          safeFileUrl = fileUrl.trim();
+        } else {
+          return res.status(400).json({
+            error: 'Document file must be an HTTPS URL or PNG/JPEG/WEBP/PDF file under 650KB.',
+          });
+        }
       }
 
       const [doc] = await db
@@ -1564,6 +2169,7 @@ app.post(
           driverId: profile.id,
           docType: String(docType),
           documentNumber: String(documentNumber).trim(),
+          fileUrl: safeFileUrl,
           status: 'PENDING',
         })
         .returning();
@@ -1618,6 +2224,46 @@ app.post(
   }
 );
 
+app.delete(
+  '/api/driver/availability/:id',
+  requireAuth,
+  requireRole('DRIVER', 'ADMIN'),
+  async (req: AuthRequest, res) => {
+    try {
+      const blockId = Number(req.params.id);
+      const [profile] = await db
+        .select()
+        .from(driverProfiles)
+        .where(eq(driverProfiles.userId, req.authUser!.id))
+        .limit(1);
+
+      if (!profile) {
+        return res.status(404).json({ error: 'Driver profile not found.' });
+      }
+
+      const [deleted] = await db
+        .delete(availabilityBlocks)
+        .where(
+          and(
+            eq(availabilityBlocks.id, blockId),
+            eq(availabilityBlocks.targetType, 'DRIVER'),
+            eq(availabilityBlocks.targetId, profile.id)
+          )
+        )
+        .returning();
+
+      if (!deleted) {
+        return res.status(404).json({ error: 'Availability block not found.' });
+      }
+
+      res.json({ deleted: true });
+    } catch (err) {
+      console.error('Delete driver availability block error:', err);
+      res.status(500).json({ error: 'Unable to remove availability block.' });
+    }
+  }
+);
+
 app.post(
   '/api/driver/bookings/:id/decision',
   requireAuth,
@@ -1656,6 +2302,18 @@ app.post(
         return res.status(404).json({ error: 'Booking not found.' });
       }
 
+      if (['CANCELLED', 'COMPLETED', 'REFUNDED'].includes(booking.status)) {
+        return res.status(400).json({
+          error: `Cannot update assignment for a ${booking.status.toLowerCase()} booking.`,
+        });
+      }
+
+      if (booking.driverDecision !== 'PENDING') {
+        return res.status(409).json({
+          error: `Assignment has already been ${booking.driverDecision?.toLowerCase()}.`,
+        });
+      }
+
       if (decision === 'ACCEPTED') {
         const conflict = await checkAvailabilityConflicts({
           driverId: profile.id,
@@ -1671,22 +2329,43 @@ app.post(
       const nextStatus =
         decision === 'REJECTED' ? 'CANCELLED' : booking.status;
 
-      const [updated] = await db
-        .update(bookings)
-        .set({
-          driverDecision: decision,
-          status: nextStatus,
-          updatedAt: new Date(),
-        })
-        .where(eq(bookings.id, booking.id))
-        .returning();
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(bookings)
+          .set({
+            driverDecision: decision,
+            status: nextStatus,
+            updatedAt: new Date(),
+          })
+          .where(eq(bookings.id, booking.id))
+          .returning();
 
-      await db.insert(bookingStatusLogs).values({
-        bookingId: booking.id,
-        fromStatus: booking.status,
-        toStatus: nextStatus,
-        changedByUserId: req.authUser!.id,
-        note: `Driver ${decision.toLowerCase()} booking request.`,
+        await tx.insert(bookingStatusLogs).values({
+          bookingId: booking.id,
+          fromStatus: booking.status,
+          toStatus: nextStatus,
+          changedByUserId: req.authUser!.id,
+          note: `Driver ${decision.toLowerCase()} booking request.`,
+        });
+
+        await createNotification(
+          {
+            userId: booking.customerId,
+            type: 'BOOKING',
+            title:
+              decision === 'ACCEPTED'
+                ? `Driver Accepted (${booking.bookingCode})`
+                : `Driver Declined (${booking.bookingCode})`,
+            message:
+              decision === 'ACCEPTED'
+                ? `${profile.fullName} accepted your assignment for ${booking.bookingCode}.`
+                : `${profile.fullName} declined assignment ${booking.bookingCode}. Booking has been cancelled.`,
+            linkUrl: `/dashboard/bookings/${booking.id}`,
+          },
+          tx as unknown as typeof db
+        );
+
+        return row;
       });
 
       res.json({ booking: updated });
@@ -1731,6 +2410,21 @@ app.post(
         return res.status(404).json({ error: 'Booking not found.' });
       }
 
+      if (
+        nextStatus === 'IN_PROGRESS' &&
+        (booking.status !== 'CONFIRMED' || booking.driverDecision !== 'ACCEPTED')
+      ) {
+        return res.status(400).json({
+          error: 'Only confirmed bookings that you have accepted can be started.',
+        });
+      }
+
+      if (nextStatus === 'COMPLETED' && booking.status !== 'IN_PROGRESS') {
+        return res.status(400).json({
+          error: 'Only trips currently in progress can be marked completed.',
+        });
+      }
+
       const [updated] = await db.transaction(async (tx) => {
         const rows = await tx
           .update(bookings)
@@ -1752,6 +2446,23 @@ app.post(
             .set({ totalTrips: profile.totalTrips + 1 })
             .where(eq(driverProfiles.id, profile.id));
         }
+
+        await createNotification(
+          {
+            userId: booking.customerId,
+            type: 'BOOKING',
+            title:
+              nextStatus === 'IN_PROGRESS'
+                ? `Trip Started (${booking.bookingCode})`
+                : `Trip Completed (${booking.bookingCode})`,
+            message:
+              nextStatus === 'IN_PROGRESS'
+                ? `${profile.fullName} marked booking ${booking.bookingCode} as in progress.`
+                : `Your trip ${booking.bookingCode} with ${profile.fullName} is complete. You can now leave a review.`,
+            linkUrl: `/dashboard/bookings/${booking.id}`,
+          },
+          tx as unknown as typeof db
+        );
 
         return rows;
       });
@@ -1789,24 +2500,134 @@ app.get(
         .orderBy(desc(vehicles.createdAt));
 
       const vehicleIds = ownerVehicles.map((v) => v.id);
-      const ownerBookings =
+
+      const galleryRows =
         vehicleIds.length > 0
           ? await db
               .select()
+              .from(vehicleImages)
+              .where(inArray(vehicleImages.vehicleId, vehicleIds))
+              .orderBy(vehicleImages.sortOrder)
+          : [];
+
+      const imagesByVehicle = new Map<number, typeof galleryRows>();
+      for (const img of galleryRows) {
+        const list = imagesByVehicle.get(img.vehicleId) || [];
+        list.push(img);
+        imagesByVehicle.set(img.vehicleId, list);
+      }
+
+      const enrichedVehicles = ownerVehicles.map((v) => ({
+        ...v,
+        images: imagesByVehicle.get(v.id) || [],
+      }));
+
+      const bookingRows =
+        vehicleIds.length > 0
+          ? await db
+              .select({
+                booking: bookings,
+                driverName: driverProfiles.fullName,
+              })
               .from(bookings)
+              .leftJoin(driverProfiles, eq(bookings.driverId, driverProfiles.id))
               .where(inArray(bookings.vehicleId, vehicleIds))
               .orderBy(desc(bookings.createdAt))
           : [];
 
-      const earningsNgn = ownerBookings
-        .filter((b) => b.status === 'COMPLETED' || b.status === 'CONFIRMED')
-        .reduce((sum, b) => sum + b.subtotalNgn, 0);
+      const vehicleMap = new Map(ownerVehicles.map((v) => [v.id, v]));
+      const ownerBookings = bookingRows.map((r) => {
+        const v = r.booking.vehicleId ? vehicleMap.get(r.booking.vehicleId) : null;
+        return {
+          ...r.booking,
+          customerEmail: '',
+          customerPhone: ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(
+            r.booking.status
+          )
+            ? r.booking.customerPhone
+            : 'Shared on confirmation',
+          driverName: r.driverName,
+          vehicleName: v ? `${v.year} ${v.make} ${v.model}` : null,
+        };
+      });
+
+      const bookingIds = ownerBookings.map((b) => b.id);
+      const paidPayments =
+        bookingIds.length > 0
+          ? await db
+              .select({
+                bookingId: payments.bookingId,
+                reference: payments.reference,
+                status: payments.status,
+                paidAt: payments.paidAt,
+              })
+              .from(payments)
+              .where(
+                and(
+                  inArray(payments.bookingId, bookingIds),
+                  eq(payments.status, 'PAID')
+                )
+              )
+          : [];
+      const paidByBooking = new Map(paidPayments.map((p) => [p.bookingId, p]));
+
+      const computeOwnerShare = (b: typeof bookings.$inferSelect) => {
+        if (!b.driverId) return b.subtotalNgn;
+        const v = b.vehicleId ? vehicleMap.get(b.vehicleId) : null;
+        if (!v) return b.subtotalNgn;
+        const unitRate =
+          b.durationUnit === 'WEEKLY'
+            ? v.weeklyRateNgn
+            : b.durationUnit === 'MONTHLY'
+              ? v.monthlyRateNgn
+              : v.dailyRateNgn;
+        return Math.min(b.subtotalNgn, unitRate * b.durationCount);
+      };
+
+      const earningsLedger = ownerBookings
+        .filter(
+          (b) =>
+            ['CONFIRMED', 'IN_PROGRESS', 'COMPLETED'].includes(b.status) &&
+            paidByBooking.has(b.id)
+        )
+        .map((b) => {
+          const pay = paidByBooking.get(b.id)!;
+          const ownerShareNgn = computeOwnerShare(b);
+          return {
+            bookingId: b.id,
+            bookingCode: b.bookingCode,
+            vehicleName: b.vehicleName,
+            serviceType: b.serviceType,
+            status: b.status,
+            reference: pay.reference,
+            paidAt: pay.paidAt || b.createdAt,
+            grossSubtotalNgn: b.subtotalNgn,
+            platformFeeNgn: b.platformFeeNgn,
+            ownerShareNgn,
+          };
+        });
+
+      const completedEarningsNgn = earningsLedger
+        .filter((e) => e.status === 'COMPLETED')
+        .reduce((sum, e) => sum + e.ownerShareNgn, 0);
+
+      const pendingEarningsNgn = earningsLedger
+        .filter((e) => e.status === 'CONFIRMED' || e.status === 'IN_PROGRESS')
+        .reduce((sum, e) => sum + e.ownerShareNgn, 0);
+
+      const completedRentalsCount = ownerBookings.filter(
+        (b) => b.status === 'COMPLETED'
+      ).length;
 
       res.json({
         owner,
-        vehicles: ownerVehicles,
+        vehicles: enrichedVehicles,
         bookings: ownerBookings,
-        earningsNgn,
+        earningsNgn: completedEarningsNgn,
+        completedEarningsNgn,
+        pendingEarningsNgn,
+        completedRentalsCount,
+        earningsLedger,
       });
     } catch (err) {
       console.error('Owner dashboard error:', err);
@@ -1842,6 +2663,7 @@ app.post(
         location,
         plateNumber,
         description,
+        features,
         dailyRateNgn,
         weeklyRateNgn,
         monthlyRateNgn,
@@ -1856,13 +2678,13 @@ app.post(
           .json({ error: 'Make, model, location, plate number, and daily rate are required.' });
       }
 
-      // Only allow local generated assets or https:// URLs
-      const safeImageUrl =
-        typeof primaryImageUrl === 'string' &&
-        (primaryImageUrl.startsWith('/src/assets/') ||
-          primaryImageUrl.startsWith('https://'))
-          ? primaryImageUrl
-          : '/src/assets/images/vehicle_exec_sedan_1795309126661.jpg';
+      const safeImageUrl = isSafeImageInput(primaryImageUrl)
+        ? primaryImageUrl.trim()
+        : '/src/assets/images/vehicle_exec_sedan_1795309126661.jpg';
+
+      const parsedFeatures = Array.isArray(features) && features.length > 0
+        ? features.map((f) => String(f).trim()).filter(Boolean)
+        : ['Full AC', 'Comprehensive Insurance'];
 
       const [vehicle] = await db.transaction(async (tx) => {
         const [v] = await tx
@@ -1871,7 +2693,7 @@ app.post(
             ownerId: owner.id,
             make: String(make).trim(),
             model: String(model).trim(),
-            year: Number(year) || 2023,
+            year: Math.max(1995, Math.min(2028, Number(year) || 2023)),
             category: String(category).toUpperCase(),
             transmission: String(transmission).toUpperCase(),
             fuelType: String(fuelType),
@@ -1881,7 +2703,7 @@ app.post(
             description:
               String(description || '').trim() ||
               `${year || 2023} ${make} ${model} available in ${location}.`,
-            features: ['Full AC', 'Comprehensive Insurance'],
+            features: parsedFeatures,
             requirements: ['Valid ID required at pickup'],
             dailyRateNgn: Math.max(5000, Number(dailyRateNgn)),
             weeklyRateNgn: Math.max(
@@ -1937,29 +2759,111 @@ app.patch(
         .where(eq(vehicles.id, vehicleId))
         .limit(1);
 
-      if (!vehicle || (!owner && req.authUser!.role !== 'ADMIN') || (owner && vehicle.ownerId !== owner.id && req.authUser!.role !== 'ADMIN')) {
+      if (
+        !vehicle ||
+        (!owner && req.authUser!.role !== 'ADMIN') ||
+        (owner && vehicle.ownerId !== owner.id && req.authUser!.role !== 'ADMIN')
+      ) {
         return res.status(404).json({ error: 'Vehicle not found.' });
       }
 
-      const { dailyRateNgn, weeklyRateNgn, monthlyRateNgn, availabilityStatus } =
-        req.body ?? {};
+      const {
+        make,
+        model,
+        year,
+        category,
+        transmission,
+        fuelType,
+        seats,
+        location,
+        plateNumber,
+        description,
+        features,
+        dailyRateNgn,
+        weeklyRateNgn,
+        monthlyRateNgn,
+        allowsSelfDrive,
+        allowsChauffeur,
+        availabilityStatus,
+        primaryImageUrl,
+      } = req.body ?? {};
+
+      let nextPrimaryImage = vehicle.primaryImageUrl;
+      if (primaryImageUrl !== undefined && primaryImageUrl !== null && primaryImageUrl !== '') {
+        if (!isSafeImageInput(primaryImageUrl)) {
+          return res.status(400).json({
+            error: 'Vehicle photo must be a valid HTTPS URL, preset asset, or PNG/JPEG/WEBP upload.',
+          });
+        }
+        nextPrimaryImage = primaryImageUrl.trim();
+      }
 
       const [updated] = await db
         .update(vehicles)
         .set({
+          make: typeof make === 'string' && make.trim() ? make.trim() : vehicle.make,
+          model: typeof model === 'string' && model.trim() ? model.trim() : vehicle.model,
+          year:
+            Number(year) >= 1995 && Number(year) <= 2028
+              ? Math.floor(Number(year))
+              : vehicle.year,
+          category:
+            typeof category === 'string' && category.trim()
+              ? category.toUpperCase()
+              : vehicle.category,
+          transmission:
+            typeof transmission === 'string' && ['AUTOMATIC', 'MANUAL'].includes(transmission.toUpperCase())
+              ? transmission.toUpperCase()
+              : vehicle.transmission,
+          fuelType:
+            typeof fuelType === 'string' && fuelType.trim()
+              ? fuelType.trim()
+              : vehicle.fuelType,
+          seats:
+            Number(seats) >= 2 && Number(seats) <= 50
+              ? Math.floor(Number(seats))
+              : vehicle.seats,
+          location:
+            typeof location === 'string' && location.trim()
+              ? location.trim()
+              : vehicle.location,
+          plateNumber:
+            typeof plateNumber === 'string' && plateNumber.trim()
+              ? plateNumber.trim().toUpperCase()
+              : vehicle.plateNumber,
+          description:
+            typeof description === 'string' && description.trim()
+              ? description.trim()
+              : vehicle.description,
+          features: Array.isArray(features)
+            ? features.map((f) => String(f).trim()).filter(Boolean)
+            : vehicle.features,
           dailyRateNgn:
-            Number(dailyRateNgn) > 0 ? Number(dailyRateNgn) : vehicle.dailyRateNgn,
+            Number(dailyRateNgn) >= 5000
+              ? Math.round(Number(dailyRateNgn))
+              : vehicle.dailyRateNgn,
           weeklyRateNgn:
-            Number(weeklyRateNgn) > 0 ? Number(weeklyRateNgn) : vehicle.weeklyRateNgn,
+            Number(weeklyRateNgn) >= 10000
+              ? Math.round(Number(weeklyRateNgn))
+              : vehicle.weeklyRateNgn,
           monthlyRateNgn:
-            Number(monthlyRateNgn) > 0
-              ? Number(monthlyRateNgn)
+            Number(monthlyRateNgn) >= 50000
+              ? Math.round(Number(monthlyRateNgn))
               : vehicle.monthlyRateNgn,
+          allowsSelfDrive:
+            typeof allowsSelfDrive === 'boolean'
+              ? allowsSelfDrive
+              : vehicle.allowsSelfDrive,
+          allowsChauffeur:
+            typeof allowsChauffeur === 'boolean'
+              ? allowsChauffeur
+              : vehicle.allowsChauffeur,
           availabilityStatus: ['AVAILABLE', 'RENTED', 'MAINTENANCE'].includes(
             availabilityStatus
           )
             ? availabilityStatus
             : vehicle.availabilityStatus,
+          primaryImageUrl: nextPrimaryImage,
         })
         .where(eq(vehicles.id, vehicle.id))
         .returning();
@@ -1968,6 +2872,173 @@ app.patch(
     } catch (err) {
       console.error('Update vehicle error:', err);
       res.status(500).json({ error: 'Unable to update vehicle.' });
+    }
+  }
+);
+
+app.post(
+  '/api/owner/vehicles/:id/images',
+  requireAuth,
+  requireRole('VEHICLE_OWNER', 'ADMIN'),
+  async (req: AuthRequest, res) => {
+    try {
+      const vehicleId = Number(req.params.id);
+      const { imageUrl, caption, setAsPrimary } = req.body ?? {};
+      if (!isSafeImageInput(imageUrl)) {
+        return res.status(400).json({
+          error: 'Image must be an HTTPS URL, preset asset, or PNG/JPEG/WEBP image under 650KB.',
+        });
+      }
+
+      const [owner] = await db
+        .select()
+        .from(vehicleOwners)
+        .where(eq(vehicleOwners.userId, req.authUser!.id))
+        .limit(1);
+
+      const [vehicle] = await db
+        .select()
+        .from(vehicles)
+        .where(eq(vehicles.id, vehicleId))
+        .limit(1);
+
+      if (
+        !vehicle ||
+        (!owner && req.authUser!.role !== 'ADMIN') ||
+        (owner && vehicle.ownerId !== owner.id && req.authUser!.role !== 'ADMIN')
+      ) {
+        return res.status(404).json({ error: 'Vehicle not found.' });
+      }
+
+      const cleanUrl = imageUrl.trim();
+      const [createdImage] = await db.transaction(async (tx) => {
+        const rows = await tx
+          .insert(vehicleImages)
+          .values({
+            vehicleId: vehicle.id,
+            imageUrl: cleanUrl,
+            caption: caption ? String(caption).trim() : null,
+            sortOrder: 1,
+          })
+          .returning();
+
+        if (setAsPrimary) {
+          await tx
+            .update(vehicles)
+            .set({ primaryImageUrl: cleanUrl })
+            .where(eq(vehicles.id, vehicle.id));
+        }
+
+        return rows;
+      });
+
+      res.status(201).json({ image: createdImage });
+    } catch (err) {
+      console.error('Add vehicle image error:', err);
+      res.status(500).json({ error: 'Unable to add vehicle photo.' });
+    }
+  }
+);
+
+app.delete(
+  '/api/owner/vehicles/:id/images/:imageId',
+  requireAuth,
+  requireRole('VEHICLE_OWNER', 'ADMIN'),
+  async (req: AuthRequest, res) => {
+    try {
+      const vehicleId = Number(req.params.id);
+      const imageId = Number(req.params.imageId);
+      const [owner] = await db
+        .select()
+        .from(vehicleOwners)
+        .where(eq(vehicleOwners.userId, req.authUser!.id))
+        .limit(1);
+
+      const [vehicle] = await db
+        .select()
+        .from(vehicles)
+        .where(eq(vehicles.id, vehicleId))
+        .limit(1);
+
+      if (
+        !vehicle ||
+        (!owner && req.authUser!.role !== 'ADMIN') ||
+        (owner && vehicle.ownerId !== owner.id && req.authUser!.role !== 'ADMIN')
+      ) {
+        return res.status(404).json({ error: 'Vehicle not found.' });
+      }
+
+      await db
+        .delete(vehicleImages)
+        .where(
+          and(
+            eq(vehicleImages.id, imageId),
+            eq(vehicleImages.vehicleId, vehicle.id)
+          )
+        );
+
+      res.json({ deleted: true });
+    } catch (err) {
+      console.error('Delete vehicle image error:', err);
+      res.status(500).json({ error: 'Unable to remove vehicle photo.' });
+    }
+  }
+);
+
+app.delete(
+  '/api/owner/vehicles/:id',
+  requireAuth,
+  requireRole('VEHICLE_OWNER', 'ADMIN'),
+  async (req: AuthRequest, res) => {
+    try {
+      const vehicleId = Number(req.params.id);
+      const [owner] = await db
+        .select()
+        .from(vehicleOwners)
+        .where(eq(vehicleOwners.userId, req.authUser!.id))
+        .limit(1);
+
+      const [vehicle] = await db
+        .select()
+        .from(vehicles)
+        .where(eq(vehicles.id, vehicleId))
+        .limit(1);
+
+      if (
+        !vehicle ||
+        (!owner && req.authUser!.role !== 'ADMIN') ||
+        (owner && vehicle.ownerId !== owner.id && req.authUser!.role !== 'ADMIN')
+      ) {
+        return res.status(404).json({ error: 'Vehicle not found.' });
+      }
+
+      const activeBookings = await db
+        .select({ id: bookings.id })
+        .from(bookings)
+        .where(
+          and(
+            eq(bookings.vehicleId, vehicle.id),
+            inArray(bookings.status, [
+              'PENDING',
+              'AWAITING_PAYMENT',
+              'CONFIRMED',
+              'IN_PROGRESS',
+            ])
+          )
+        )
+        .limit(1);
+
+      if (activeBookings.length > 0) {
+        return res.status(409).json({
+          error: 'Cannot remove a vehicle with active or upcoming bookings. Set status to Maintenance instead.',
+        });
+      }
+
+      await db.delete(vehicles).where(eq(vehicles.id, vehicle.id));
+      res.json({ deleted: true });
+    } catch (err) {
+      console.error('Delete vehicle error:', err);
+      res.status(500).json({ error: 'Unable to remove vehicle.' });
     }
   }
 );
@@ -2059,24 +3130,69 @@ app.post(
         return res.status(403).json({ error: 'Unauthorized.' });
       }
 
+      if (['CANCELLED', 'COMPLETED', 'REFUNDED'].includes(booking.status)) {
+        return res.status(400).json({
+          error: `Cannot update decision for a ${booking.status.toLowerCase()} booking.`,
+        });
+      }
+
+      if (booking.ownerDecision !== 'PENDING') {
+        return res.status(409).json({
+          error: `Rental request was already ${booking.ownerDecision?.toLowerCase()}.`,
+        });
+      }
+
+      if (decision === 'ACCEPTED') {
+        const conflict = await checkAvailabilityConflicts({
+          vehicleId: vehicle.id,
+          startDate: booking.startDate,
+          endDate: booking.endDate,
+          excludeBookingId: booking.id,
+        });
+        if (conflict) {
+          return res.status(409).json({ error: conflict });
+        }
+      }
+
       const nextStatus = decision === 'REJECTED' ? 'CANCELLED' : booking.status;
 
-      const [updated] = await db
-        .update(bookings)
-        .set({
-          ownerDecision: decision,
-          status: nextStatus,
-          updatedAt: new Date(),
-        })
-        .where(eq(bookings.id, booking.id))
-        .returning();
+      const updated = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .update(bookings)
+          .set({
+            ownerDecision: decision,
+            status: nextStatus,
+            updatedAt: new Date(),
+          })
+          .where(eq(bookings.id, booking.id))
+          .returning();
 
-      await db.insert(bookingStatusLogs).values({
-        bookingId: booking.id,
-        fromStatus: booking.status,
-        toStatus: nextStatus,
-        changedByUserId: req.authUser!.id,
-        note: `Vehicle owner ${decision.toLowerCase()} rental request.`,
+        await tx.insert(bookingStatusLogs).values({
+          bookingId: booking.id,
+          fromStatus: booking.status,
+          toStatus: nextStatus,
+          changedByUserId: req.authUser!.id,
+          note: `Vehicle owner ${decision.toLowerCase()} rental request.`,
+        });
+
+        await createNotification(
+          {
+            userId: booking.customerId,
+            type: 'BOOKING',
+            title:
+              decision === 'ACCEPTED'
+                ? `Rental Approved (${booking.bookingCode})`
+                : `Rental Declined (${booking.bookingCode})`,
+            message:
+              decision === 'ACCEPTED'
+                ? `${vehicle.year} ${vehicle.make} ${vehicle.model} reservation ${booking.bookingCode} has been approved by the owner.`
+                : `Owner declined reservation ${booking.bookingCode} for ${vehicle.year} ${vehicle.make} ${vehicle.model}.`,
+            linkUrl: `/dashboard/bookings/${booking.id}`,
+          },
+          tx as unknown as typeof db
+        );
+
+        return row;
       });
 
       res.json({ booking: updated });
@@ -2200,6 +3316,24 @@ app.post(
             .where(eq(driverDocuments.driverId, driverId));
         }
 
+        if (rows[0]) {
+          await createNotification(
+            {
+              userId: rows[0].userId,
+              type: 'VERIFICATION',
+              title: `Driver Verification ${status === 'VERIFIED' ? 'Approved' : status === 'REJECTED' ? 'Rejected' : 'Updated'}`,
+              message:
+                status === 'VERIFIED'
+                  ? 'Your driver profile is now verified and visible on the ProDrivers marketplace.'
+                  : status === 'REJECTED'
+                    ? 'Your driver verification documents require attention. Review and resubmit from your dashboard.'
+                    : 'Your driver verification status is pending administrative review.',
+              linkUrl: '/dashboard/driver',
+            },
+            tx as unknown as typeof db
+          );
+        }
+
         return rows;
       });
 
@@ -2227,11 +3361,36 @@ app.post(
         return res.status(400).json({ error: 'Invalid approval status.' });
       }
 
-      const [updated] = await db
-        .update(vehicles)
-        .set({ approvalStatus: status })
-        .where(eq(vehicles.id, vehicleId))
-        .returning();
+      const [updated] = await db.transaction(async (tx) => {
+        const rows = await tx
+          .update(vehicles)
+          .set({ approvalStatus: status })
+          .where(eq(vehicles.id, vehicleId))
+          .returning();
+
+        if (rows[0]) {
+          const [owner] = await tx
+            .select({ userId: vehicleOwners.userId })
+            .from(vehicleOwners)
+            .where(eq(vehicleOwners.id, rows[0].ownerId))
+            .limit(1);
+
+          if (owner) {
+            await createNotification(
+              {
+                userId: owner.userId,
+                type: 'VERIFICATION',
+                title: `Vehicle Listing ${status === 'APPROVED' ? 'Approved' : status === 'REJECTED' ? 'Rejected' : 'Pending'}`,
+                message: `${rows[0].year} ${rows[0].make} ${rows[0].model} (${rows[0].plateNumber}) approval status is now ${status}.`,
+                linkUrl: '/dashboard/owner',
+              },
+              tx as unknown as typeof db
+            );
+          }
+        }
+
+        return rows;
+      });
 
       if (!updated) {
         return res.status(404).json({ error: 'Vehicle not found.' });

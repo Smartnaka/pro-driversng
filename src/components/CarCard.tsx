@@ -11,64 +11,79 @@ export function CarCard({ car }: { car: Vehicle }) {
     .filter(Boolean)
     .join(' / ');
 
+  const topFeatures = Array.isArray(car.features)
+    ? car.features.slice(0, 2).join(' · ')
+    : '';
+
   return (
-    <div className="group flex flex-col overflow-hidden rounded-2xl bg-[#F5F6F8] transition-colors duration-150 hover:bg-[#ECEEF2]">
+    <article className="group flex flex-col overflow-hidden rounded-2xl border border-slate-200/80 bg-[#F5F6F8] transition-colors duration-150 hover:bg-[#ECEEF2]">
       <div className="aspect-[4/3] w-full overflow-hidden bg-slate-200">
         <SafeImage
           src={car.primaryImageUrl}
           alt={`${car.year} ${car.make} ${car.model}`}
           fallbackType="car"
-          className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+          loading="lazy"
+          className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
         />
       </div>
 
       <div className="flex flex-1 flex-col p-5">
         <div className="flex items-start justify-between gap-3">
-          <div>
+          <div className="min-w-0">
             <p className="text-xs font-medium text-slate-500">
               {car.category}
               <span aria-hidden="true"> · </span>
-              {car.year}
+              <span className="tabular-nums">{car.year}</span>
             </p>
-            <h3 className="mt-0.5 font-display text-lg font-bold text-[#111315]">
+            <h3 className="mt-0.5 truncate font-display text-lg font-bold text-[#111315]">
               {car.make} {car.model}
             </h3>
           </div>
           <StatusText status={car.availabilityStatus} />
         </div>
 
-        <p className="mt-2 text-xs text-slate-600">
+        <p className="mt-2.5 text-xs text-slate-600">
           {car.transmission === 'AUTOMATIC' ? 'Automatic' : 'Manual'}
           <span aria-hidden="true"> · </span>
-          {car.seats} seats
+          <span className="tabular-nums">{car.seats} seats</span>
           <span aria-hidden="true"> · </span>
           {car.location}
         </p>
 
-        <p className="mt-1.5 text-xs text-slate-500">{rentalModes}</p>
-
-        <div className="mt-4 flex items-center justify-between border-t border-slate-200/80 pt-4">
-          <p className="font-mono text-base font-bold text-[#111315] tabular-nums">
-            {formatNaira(car.dailyRateNgn)}
-            <span className="font-sans text-xs font-normal text-slate-500">
-              {' '}
-              / day
+        <p className="mt-1.5 text-xs font-medium text-slate-600">
+          {rentalModes}
+          {topFeatures ? (
+            <span className="font-normal text-slate-500">
+              <span aria-hidden="true"> · </span>
+              {topFeatures}
             </span>
-          </p>
-          <Link to={`/cars/${car.id}`}>
-            <Button variant="secondary" size="sm">
-              <span>Book car</span>
-              <ArrowRight className="h-3.5 w-3.5" />
-            </Button>
-          </Link>
-        </div>
+          ) : null}
+        </p>
 
-        {car.isDemo ? (
-          <p className="mt-2.5 text-[11px] text-slate-400">
-            Demo vehicle listing
-          </p>
-        ) : null}
+        <div className="mt-auto pt-4">
+          <div className="flex items-center justify-between border-t border-slate-200/80 pt-4">
+            <p className="font-mono text-base font-bold text-[#111315] tabular-nums">
+              {formatNaira(car.dailyRateNgn)}
+              <span className="font-sans text-xs font-normal text-slate-500">
+                {' '}
+                / day
+              </span>
+            </p>
+            <Link to={`/cars/${car.id}`}>
+              <Button variant="secondary" size="sm">
+                <span>View vehicle</span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Button>
+            </Link>
+          </div>
+
+          {car.isDemo ? (
+            <p className="mt-2.5 text-[11px] text-slate-400">
+              Demo vehicle listing
+            </p>
+          ) : null}
+        </div>
       </div>
-    </div>
+    </article>
   );
 }

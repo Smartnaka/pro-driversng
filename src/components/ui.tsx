@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import {
-  AlertCircle,
   Car,
   CheckCircle2,
   Clock,
@@ -29,27 +28,27 @@ export function Button({
 }: ButtonProps) {
   const variants = {
     primary:
-      'bg-[#32BB78] text-[#111315] font-semibold hover:bg-[#29A86A] focus-visible:ring-[#32BB78]',
+      'bg-[var(--pd-primary)] text-white font-semibold hover:bg-[var(--pd-primary-hover)] focus-visible:ring-[var(--pd-primary)]',
     secondary:
-      'bg-[#111315] text-white font-semibold hover:bg-[#24282D] focus-visible:ring-[#111315]',
+      'bg-[var(--pd-ink)] text-white font-semibold hover:bg-[#1E2622] focus-visible:ring-[var(--pd-ink)]',
     outline:
-      'border border-slate-300 bg-white text-[#111315] font-medium hover:bg-[#F5F6F8] focus-visible:ring-slate-400',
+      'border border-[var(--pd-border-strong)] bg-[var(--pd-surface)] text-[var(--pd-ink)] font-semibold hover:bg-[var(--pd-surface-muted)] focus-visible:ring-[var(--pd-primary)]',
     ghost:
-      'bg-transparent text-slate-700 font-medium hover:bg-[#F5F6F8] focus-visible:ring-slate-400',
+      'bg-transparent text-[var(--pd-ink-muted)] font-semibold hover:bg-[var(--pd-surface-muted)] hover:text-[var(--pd-ink)] focus-visible:ring-[var(--pd-primary)]',
     danger:
-      'bg-red-600 text-white font-semibold hover:bg-red-700 focus-visible:ring-red-600',
+      'bg-[#B91C1C] text-white font-semibold hover:bg-[#991B1B] focus-visible:ring-[#B91C1C]',
   };
 
   const sizes = {
-    sm: 'px-4 py-2 text-xs',
-    md: 'px-5 py-2.5 text-sm',
-    lg: 'px-7 py-3.5 text-sm',
+    sm: 'px-3.5 py-2 text-xs',
+    md: 'px-4 py-2.5 text-sm',
+    lg: 'px-6 py-3 text-sm',
   };
 
   return (
     <button
       className={cn(
-        'inline-flex items-center justify-center gap-2 rounded-full transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer',
+        'inline-flex items-center justify-center gap-2 rounded-lg transition-colors duration-150 whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none cursor-pointer',
         variants[variant],
         sizes[size],
         className
@@ -69,7 +68,7 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-2xl border border-slate-200/90 bg-white',
+        'rounded-xl border border-[var(--pd-border)] bg-[var(--pd-surface)]',
         className
       )}
       {...props}
@@ -86,7 +85,7 @@ export function Input({
   return (
     <input
       className={cn(
-        'w-full rounded-xl border border-slate-200 bg-[#F5F6F8] px-3.5 py-2.5 text-sm text-[#111315] placeholder:text-slate-400 transition-colors focus:border-[#111315] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#32BB78]/25 disabled:opacity-60',
+        'w-full rounded-lg border border-[var(--pd-border)] bg-[var(--pd-surface)] px-3.5 py-2.5 text-sm text-[var(--pd-ink)] placeholder:text-[var(--pd-ink-subtle)] transition-colors focus:border-[var(--pd-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--pd-primary)]/20 disabled:opacity-60',
         className
       )}
       {...props}
@@ -102,7 +101,7 @@ export function Select({
   return (
     <select
       className={cn(
-        'w-full rounded-xl border border-slate-200 bg-[#F5F6F8] px-3.5 py-2.5 text-sm text-[#111315] transition-colors focus:border-[#111315] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#32BB78]/25 disabled:opacity-60',
+        'w-full rounded-lg border border-[var(--pd-border)] bg-[var(--pd-surface)] px-3.5 py-2.5 text-sm text-[var(--pd-ink)] transition-colors focus:border-[var(--pd-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--pd-primary)]/20 disabled:opacity-60',
         className
       )}
       {...props}
@@ -119,7 +118,7 @@ export function Textarea({
   return (
     <textarea
       className={cn(
-        'w-full rounded-xl border border-slate-200 bg-[#F5F6F8] px-3.5 py-2.5 text-sm text-[#111315] placeholder:text-slate-400 transition-colors focus:border-[#111315] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#32BB78]/25',
+        'w-full rounded-lg border border-[var(--pd-border)] bg-[var(--pd-surface)] px-3.5 py-2.5 text-sm text-[var(--pd-ink)] placeholder:text-[var(--pd-ink-subtle)] transition-colors focus:border-[var(--pd-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--pd-primary)]/20',
         className
       )}
       {...props}
@@ -141,8 +140,8 @@ export function StatusText({ status }: { status: string }) {
     ].includes(s)
   ) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-700 whitespace-nowrap">
-        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-800 whitespace-nowrap">
+        <CheckCircle2 className="h-3 w-3 shrink-0" />
         <span>{formatStatus(s)}</span>
       </span>
     );
@@ -151,8 +150,8 @@ export function StatusText({ status }: { status: string }) {
     ['AWAITING_PAYMENT', 'PENDING', 'IN_PROGRESS', 'BUSY', 'OPEN'].includes(s)
   ) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 whitespace-nowrap">
-        <Clock className="h-3.5 w-3.5 shrink-0" />
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-800 whitespace-nowrap">
+        <Clock className="h-3 w-3 shrink-0" />
         <span>{formatStatus(s)}</span>
       </span>
     );
@@ -168,15 +167,15 @@ export function StatusText({ status }: { status: string }) {
     ].includes(s)
   ) {
     return (
-      <span className="inline-flex items-center gap-1.5 text-xs font-medium text-red-700 whitespace-nowrap">
-        <XCircle className="h-3.5 w-3.5 shrink-0" />
+      <span className="inline-flex items-center gap-1.5 rounded-full border border-red-200 bg-red-50 px-2.5 py-0.5 text-xs font-medium text-red-800 whitespace-nowrap">
+        <XCircle className="h-3 w-3 shrink-0" />
         <span>{formatStatus(s)}</span>
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-600 whitespace-nowrap">
-      <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-[var(--pd-border)] bg-[var(--pd-surface-muted)] px-2.5 py-0.5 text-xs font-medium text-[var(--pd-ink-muted)] whitespace-nowrap">
+      <ShieldAlert className="h-3 w-3 shrink-0" />
       <span>{formatStatus(s)}</span>
     </span>
   );
@@ -193,18 +192,22 @@ export function EmptyState({
   title,
   description,
   action,
+  icon,
 }: {
   title: string;
   description: string;
   action?: React.ReactNode;
+  icon?: React.ReactNode;
 }) {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-[#F5F6F8] px-6 py-12 text-center">
-      <AlertCircle className="mx-auto h-8 w-8 text-slate-400" />
-      <h3 className="mt-3 font-display text-base font-semibold text-[#111315]">
+    <div className="rounded-xl border border-[var(--pd-border)] bg-[var(--pd-surface)] px-5 py-8 text-center">
+      <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--pd-primary-soft)] text-[var(--pd-primary)]">
+        {icon || <Car className="h-5 w-5" />}
+      </div>
+      <h3 className="mt-3.5 font-display text-base font-bold text-[var(--pd-ink)]">
         {title}
       </h3>
-      <p className="mx-auto mt-1.5 max-w-md text-sm text-slate-600">
+      <p className="mx-auto mt-1 max-w-md text-sm text-[var(--pd-ink-muted)]">
         {description}
       </p>
       {action ? <div className="mt-5">{action}</div> : null}
@@ -217,11 +220,13 @@ export function SafeImage({
   alt,
   className,
   fallbackType = 'car',
+  loading = 'lazy',
 }: {
   src?: string | null;
   alt: string;
   className?: string;
   fallbackType?: 'car' | 'driver';
+  loading?: 'eager' | 'lazy';
 }) {
   const [failed, setFailed] = useState(false);
 
@@ -229,7 +234,7 @@ export function SafeImage({
     return (
       <div
         className={cn(
-          'flex flex-col items-center justify-center bg-[#F5F6F8] text-slate-400',
+          'flex flex-col items-center justify-center bg-[var(--pd-surface-muted)] text-[var(--pd-ink-subtle)]',
           className
         )}
         aria-label={alt}
@@ -247,6 +252,7 @@ export function SafeImage({
     <img
       src={src}
       alt={alt}
+      loading={loading}
       referrerPolicy="no-referrer"
       onError={() => setFailed(true)}
       className={className}

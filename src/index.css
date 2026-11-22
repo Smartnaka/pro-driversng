@@ -4,21 +4,46 @@
   --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-pd-bg: #F6F7F5;
+  --color-pd-surface: #FFFFFF;
+  --color-pd-surface-muted: #EEF1EE;
+  --color-pd-border: #E1E6E2;
+  --color-pd-border-strong: #CBD3CD;
+  --color-pd-ink: #121714;
+  --color-pd-ink-muted: #4A554F;
+  --color-pd-ink-subtle: #69746E;
+  --color-pd-primary: #14532D;
+  --color-pd-primary-hover: #0F4022;
+  --color-pd-primary-soft: #E9F2EC;
+  --color-pd-accent: #B45309;
+  --color-pd-accent-soft: #FEF3C7;
 }
 
 @layer base {
   :root {
-    --pd-ink: #111315;
-    --pd-surface: #f5f6f8;
-    --pd-green: #32bb78;
-    --pd-green-hover: #28a668;
-    --pd-green-deep: #047857;
+    --pd-bg: #F6F7F5;
+    --pd-surface: #FFFFFF;
+    --pd-surface-muted: #EEF1EE;
+    --pd-border: #E1E6E2;
+    --pd-border-strong: #CBD3CD;
+    --pd-ink: #121714;
+    --pd-ink-muted: #4A554F;
+    --pd-ink-subtle: #69746E;
+    --pd-primary: #14532D;
+    --pd-primary-hover: #0F4022;
+    --pd-primary-soft: #E9F2EC;
+    --pd-accent: #B45309;
+    --pd-accent-soft: #FEF3C7;
+    --pd-radius-control: 0.5rem;
+    --pd-radius-card: 0.75rem;
+    --pd-radius-pill: 9999px;
   }
 
   html {
     font-family: var(--font-sans);
-    color: #111315;
-    background-color: #ffffff;
+    color: var(--pd-ink);
+    background-color: var(--pd-bg);
     scroll-behavior: smooth;
   }
 
