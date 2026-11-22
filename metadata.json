@@ -1,0 +1,6 @@
+{
+  "name": "ProDrivers",
+  "description": "ProDrivers — Professional driver hiring and car rental marketplace in Lagos, Nigeria.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
