@@ -189,7 +189,7 @@ app.post('/api/auth/register', async (req, res) => {
               : `${user.fullName} Fleet`,
           location: String(location || 'Lagos'),
           contactPhone: typeof phone === 'string' && phone.trim() ? phone.trim() : '+234 800 000 0000',
-          verificationStatus: 'VERIFIED',
+          verificationStatus: 'PENDING',
         });
       }
 
@@ -1190,6 +1190,11 @@ app.post('/api/payments/initialize', requireAuth, async (req: AuthRequest, res) 
     });
 
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
+    if (!paystackKey && process.env.NODE_ENV === 'production') {
+      return res.status(503).json({
+        error: 'Online payments are temporarily unavailable. Please contact ProDrivers support.',
+      });
+    }
     if (!paystackKey) {
       return res.json({
         mode: 'SANDBOX_UNCONFIGURED',
@@ -1278,6 +1283,14 @@ app.post('/api/payments/verify', requireAuth, async (req: AuthRequest, res) => {
     }
 
     const paystackKey = process.env.PAYSTACK_SECRET_KEY;
+
+    // Sandbox confirmations are strictly limited to non-production environments.
+    // A missing Paystack secret in production must never turn a client request into a paid booking.
+    if (!paystackKey && process.env.NODE_ENV === 'production') {
+      return res.status(503).json({
+        error: 'Payment verification is temporarily unavailable. Please contact ProDrivers support.',
+      });
+    }
 
     if (!paystackKey) {
       if (!sandboxConfirm) {
